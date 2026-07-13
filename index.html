@@ -404,6 +404,7 @@ async function renderSolicitacoesList(){
               <td style="text-align:right" onclick="event.stopPropagation()">
                 <button class="btn btn-outline btn-sm" title="Exportar/enviar a solicitação" onclick="exportarSolicitacaoDoc('${s.id}')">📄 Solicitação</button>
                 <button class="btn btn-outline btn-sm" title="Exportar/enviar o comparativo de orçamentos" onclick="exportarComparativoDoc('${s.id}')">📊 Comparativo</button>
+                <button class="btn btn-danger btn-sm" title="Excluir solicitação" onclick="confirmarExclusaoSolicitacao('${s.id}','${s.numero}')">🗑</button>
               </td>
             </tr>
           `).join('')}
@@ -533,6 +534,7 @@ async function renderSolicitacaoDetail(id){
         <div style="display:flex;gap:8px;align-items:center">
           <button class="btn btn-outline btn-sm" onclick="exportarSolicitacaoDoc('${so.id}')">📄 Exportar Solicitação</button>
           <button class="btn btn-outline btn-sm" onclick="exportarComparativoDoc('${so.id}')">📊 Exportar Comparativo</button>
+          <button class="btn btn-danger btn-sm" onclick="confirmarExclusaoSolicitacao('${so.id}','${so.numero}')">🗑 Excluir</button>
         </div>
       </div>
       <div class="muted" style="margin-top:6px">${fmtDate(so.data_solicitacao)} · ${so.solicitante||'—'} · ${so.centro_custo||'—'}</div>
@@ -748,6 +750,61 @@ function openGerarOC(solicitacaoId, cotacaoId){
       <button class="btn btn-primary" onclick="salvarOC('${solicitacaoId}','${cotacaoId}')">Confirmar e gerar ID</button>
     </div>
   `);
+}
+
+/* ============================================================
+   EXCLUSÃO DE SOLICITAÇÃO
+   Bloqueada se já existir Ordem de Compra emitida (preserva o
+   histórico/rastreabilidade do PO.04). Caso contrário, exclui a
+   solicitação, seus itens e as cotações associadas (cascade no banco).
+   ============================================================ */
+async function confirmarExclusaoSolicitacao(id, numero){
+  const { count: countOC, error: errOC } = await sb
+    .from('ordens_compra').select('id', { count:'exact', head:true }).eq('solicitacao_id', id);
+  if(errOC){ toast('Erro ao verificar Ordens de Compra: '+errOC.message, true); return; }
+
+  if(countOC && countOC > 0){
+    renderModal(`
+      <h2>Não é possível excluir</h2>
+      <p>A solicitação <b>${numero}</b> já tem Ordem de Compra emitida. Para preservar o histórico do processo, solicitações com OC não podem ser excluídas.</p>
+      <p class="muted">Se precisar desfazer, altere o status da OC para "cancelada" na aba Ordens de Compra em vez de excluir a solicitação.</p>
+      <div class="row" style="margin-top:16px;justify-content:flex-end">
+        <button class="btn btn-primary" onclick="closeModal()">Entendi</button>
+      </div>
+    `);
+    return;
+  }
+
+  const { count: countCot } = await sb
+    .from('cotacoes').select('id', { count:'exact', head:true }).eq('solicitacao_id', id);
+
+  renderModal(`
+    <h2>Excluir Solicitação ${numero}?</h2>
+    <p>Isso vai apagar permanentemente:</p>
+    <ul style="margin:8px 0 8px 20px;font-size:13.5px">
+      <li>A solicitação e seus itens</li>
+      <li>${countCot||0} cotação(ões) recebida(s) associada(s)${countCot?' — inclusive anexos vinculados':''}</li>
+    </ul>
+    <p style="color:var(--danger);font-weight:600">Essa ação não pode ser desfeita.</p>
+    <div class="field"><label>Digite o número da solicitação para confirmar</label><input id="del_confirm_numero" placeholder="${numero}"></div>
+    <div class="row" style="margin-top:16px;justify-content:flex-end">
+      <button class="btn btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-danger" onclick="executarExclusaoSolicitacao('${id}','${numero}')">Excluir definitivamente</button>
+    </div>
+  `);
+}
+
+async function executarExclusaoSolicitacao(id, numero){
+  const digitado = document.getElementById('del_confirm_numero').value.trim();
+  if(digitado !== numero){ toast('O número digitado não confere com '+numero+'. Exclusão cancelada.', true); return; }
+
+  const { error } = await sb.from('solicitacoes_orcamento').delete().eq('id', id);
+  if(error){ toast('Erro ao excluir: '+error.message, true); return; }
+
+  closeModal();
+  toast(`Solicitação ${numero} excluída.`);
+  state = { tab:'solicitacoes', solicitacaoId:null };
+  route();
 }
 
 async function salvarOC(solicitacaoId, cotacaoId){
