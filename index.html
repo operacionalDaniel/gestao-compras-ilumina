@@ -774,7 +774,9 @@ async function fazerLogout(){
 async function checkAuth(){
   if(!sb){ return; } // sem config de URL/anonKey ainda
   const { data: { session } } = await sb.auth.getSession();
+  console.log('[DIAG] sessão:', session);
   if(!session){ showLogin(); return; }
+  console.log('[DIAG] user_id logado:', session.user.id, '| email:', session.user.email);
 
   const { data: permissao, error } = await sb
     .from('painel_permissoes')
@@ -782,6 +784,11 @@ async function checkAuth(){
     .eq('user_id', session.user.id)
     .eq('painel', 'compras')
     .maybeSingle();
+
+  console.log('[DIAG] resultado da query filtrada:', { permissao, error });
+
+  const semFiltro = await sb.from('painel_permissoes').select('*');
+  console.log('[DIAG] TODAS as linhas visíveis para este usuário (sem filtro):', semFiltro);
 
   if(error) console.error('Erro ao consultar painel_permissoes:', error);
 
