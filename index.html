@@ -788,7 +788,8 @@ async function checkAuth(){
   if(error || !permissao || !permissao.ativo){
     const detalhe = error ? (' [debug: '+error.message+']') : ' [debug: nenhuma linha encontrada/ativa]';
     showLogin('Login ok, mas sem permissão de acesso a este painel. Peça para liberar o acesso (painel_permissoes / painel=\'compras\').' + detalhe);
-    await sb.auth.signOut();
+    // Sessão mantida de propósito (sem signOut) para permitir diagnóstico via
+    // console do navegador enquanto o problema de permissão é investigado.
     return;
   }
 
