@@ -323,7 +323,7 @@ async function exportarComparativoDoc(id){
           if(!ci) return '<td>—</td>';
           if(!ci.disponivel) return '<td>indisponível</td>';
           const best = minByItem[it.id]!==null && ci.valor_unitario===minByItem[it.id];
-          return `<td class="${best?'best':''}">${money(ci.valor_unitario)}</td>`;
+          return `<td class="${best?'best':''}">${money(ci.valor_total)} <span style="color:#888;font-size:11px">(${money(ci.valor_unitario)}/un.)</span></td>`;
         }).join('')}</tr>`).join('')}
         <tr><td colspan="2" style="text-align:right;font-weight:700">Total</td>${cotacoes.map(c=>`<td style="font-weight:700">${money(c.valor_total)}</td>`).join('')}</tr>
       </tbody>
@@ -448,6 +448,119 @@ function addItemRow(containerId){
   `;
   c.appendChild(row);
 }
+
+/* ============================================================
+   EDIÇÃO DE SOLICITAÇÃO
+   Bloqueada se já existir Ordem de Compra (mesma trava da exclusão).
+   Se já houver cotações registradas, avisa que alterar itens pode
+   deixar as cotações desatualizadas, mas não bloqueia.
+   ============================================================ */
+async function openEditarSolicitacao(id){
+  const { data: so, error } = await sb.from('solicitacoes_orcamento').select('*').eq('id', id).single();
+  if(error){ toast('Erro ao carregar solicitação: '+error.message, true); return; }
+
+  if(so.status === 'concluida'){
+    renderModal(`
+      <h2>Não é possível editar</h2>
+      <p>A solicitação <b>${so.numero}</b> já tem Ordem de Compra emitida e não pode mais ser editada, para preservar o histórico do processo.</p>
+      <div class="row" style="margin-top:16px;justify-content:flex-end"><button class="btn btn-primary" onclick="closeModal()">Entendi</button></div>
+    `);
+    return;
+  }
+
+  const { data: itens } = await sb.from('solicitacao_itens').select('*').eq('solicitacao_id', id).order('ordem');
+  const { count: countCot } = await sb.from('cotacoes').select('id', { count:'exact', head:true }).eq('solicitacao_id', id);
+
+  renderModal(`
+    <div class="row"><h2>Editar Solicitação ${so.numero}</h2><button class="close-x" onclick="closeModal()">✕</button></div>
+    ${countCot>0?`<p style="background:#fef3e0;color:#a5680a;padding:8px 12px;border-radius:6px;font-size:13px;margin-bottom:12px">Esta solicitação já tem ${countCot} cotação(ões) registrada(s). Remover ou alterar itens pode deixar as cotações desatualizadas.</p>`:''}
+    <div class="grid3">
+      <div class="field"><label>Data</label><input type="date" id="es_data" value="${so.data_solicitacao}"></div>
+      <div class="field"><label>Solicitante</label><input id="es_solicitante" value="${so.solicitante||''}"></div>
+      <div class="field"><label>Centro de custo / Obra</label><input id="es_cc" value="${so.centro_custo||''}"></div>
+    </div>
+    <div class="field"><label><input type="checkbox" id="es_urgente" style="width:auto;display:inline-block;margin-right:6px" ${so.regime_urgente?'checked':''}>Regime de compra urgente</label></div>
+    <h3 style="margin:16px 0 8px">Itens</h3>
+    <div id="es_itens"></div>
+    <button class="btn btn-outline btn-sm" onclick="addItemRow('es_itens')">+ Adicionar item</button>
+    <div class="field" style="margin-top:14px"><label>Observações</label><textarea id="es_obs" rows="2">${so.observacoes||''}</textarea></div>
+    <div class="row" style="margin-top:16px;justify-content:flex-end">
+      <button class="btn btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="salvarEdicaoSolicitacao('${id}')">Salvar alterações</button>
+    </div>
+  `);
+
+  const container = document.getElementById('es_itens');
+  (itens||[]).forEach(it=>{
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    row.dataset.existingId = it.id;
+    row.innerHTML = `
+      <input placeholder="Código" class="it-cod" value="${it.codigo||''}">
+      <input placeholder="Descrição do item" class="it-desc" value="${it.item}">
+      <input placeholder="Un." class="it-un" value="${it.unidade||''}">
+      <input placeholder="Qtd" type="number" class="it-qtd" value="${it.quantidade}">
+      <button class="close-x" onclick="this.closest('.item-row').remove()">✕</button>
+    `;
+    container.appendChild(row);
+  });
+}
+
+async function salvarEdicaoSolicitacao(id){
+  const data_solicitacao = document.getElementById('es_data').value;
+  const solicitante = document.getElementById('es_solicitante').value.trim();
+  const centro_custo = document.getElementById('es_cc').value.trim();
+  const regime_urgente = document.getElementById('es_urgente').checked;
+  const observacoes = document.getElementById('es_obs').value.trim();
+
+  const rows = [...document.querySelectorAll('#es_itens .item-row')];
+  const itensAtuais = rows.map(r=>({
+    id: r.dataset.existingId || null,
+    codigo: r.querySelector('.it-cod').value.trim(),
+    item: r.querySelector('.it-desc').value.trim(),
+    unidade: r.querySelector('.it-un').value.trim(),
+    quantidade: Number(r.querySelector('.it-qtd').value)||1
+  })).filter(r=>r.item);
+
+  if(itensAtuais.length===0){ toast('Adicione ao menos um item.', true); return; }
+
+  try{
+    const { error } = await sb.from('solicitacoes_orcamento').update({
+      data_solicitacao, solicitante, centro_custo, regime_urgente, observacoes
+    }).eq('id', id);
+    if(error) throw error;
+
+    const { data: itensExistentes } = await sb.from('solicitacao_itens').select('id').eq('solicitacao_id', id);
+    const idsAtuais = itensAtuais.filter(i=>i.id).map(i=>i.id);
+    const idsParaRemover = (itensExistentes||[]).map(i=>i.id).filter(oldId => !idsAtuais.includes(oldId));
+
+    if(idsParaRemover.length){
+      const { error: eDel } = await sb.from('solicitacao_itens').delete().in('id', idsParaRemover);
+      if(eDel) throw new Error('Não foi possível remover um ou mais itens (provavelmente já têm cotação vinculada): '+eDel.message);
+    }
+
+    for(const [idx, it] of itensAtuais.entries()){
+      if(it.id){
+        const { error: eUpd } = await sb.from('solicitacao_itens').update({
+          codigo: it.codigo, item: it.item, unidade: it.unidade, quantidade: it.quantidade, ordem: idx
+        }).eq('id', it.id);
+        if(eUpd) throw eUpd;
+      } else {
+        const { error: eIns } = await sb.from('solicitacao_itens').insert({
+          solicitacao_id: id, codigo: it.codigo, item: it.item, unidade: it.unidade, quantidade: it.quantidade, ordem: idx
+        });
+        if(eIns) throw eIns;
+      }
+    }
+
+    closeModal();
+    toast('Solicitação atualizada.');
+    renderSolicitacaoDetail(id);
+  }catch(err){
+    toast('Erro ao salvar edição: '+err.message, true);
+  }
+}
+
 async function salvarSolicitacao(){
   const data_solicitacao = document.getElementById('ns_data').value;
   const solicitante = document.getElementById('ns_solicitante').value.trim();
@@ -532,6 +645,7 @@ async function renderSolicitacaoDetail(id){
           ${so.regime_urgente?'<span class="status cancelada" style="margin-left:6px">urgente</span>':''}
         </div>
         <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-outline btn-sm" onclick="openEditarSolicitacao('${so.id}')">✏️ Editar</button>
           <button class="btn btn-outline btn-sm" onclick="exportarSolicitacaoDoc('${so.id}')">📄 Exportar Solicitação</button>
           <button class="btn btn-outline btn-sm" onclick="exportarComparativoDoc('${so.id}')">📊 Exportar Comparativo</button>
           <button class="btn btn-danger btn-sm" onclick="confirmarExclusaoSolicitacao('${so.id}','${so.numero}')">🗑 Excluir</button>
@@ -558,7 +672,7 @@ async function renderSolicitacaoDetail(id){
                 if(!ci) return `<td class="muted">—</td>`;
                 if(!ci.disponivel) return `<td class="muted">indisponível</td>`;
                 const isBest = minByItem[it.id]!==null && ci.valor_unitario === minByItem[it.id];
-                return `<td class="${isBest?'best':''}">${money(ci.valor_unitario)}</td>`;
+                return `<td class="${isBest?'best':''}">${money(ci.valor_total)} <span class="muted" style="font-size:11px">(${money(ci.valor_unitario)}/un.)</span></td>`;
               }).join('')}
             </tr>
           `).join('')}
@@ -588,6 +702,7 @@ async function renderSolicitacaoDetail(id){
               <td>${money(c.valor_total)}</td>
               <td>${c.anexo_path?`<a class="link" href="#" onclick="abrirAnexo('${c.anexo_path}');return false;">📎 anexo</a>`:''}</td>
               <td style="text-align:right">
+                ${!jaTemOC ? `<button class="btn btn-outline btn-sm" onclick="openEditarCotacao('${c.id}','${so.id}')">✏️ Editar</button>` : ''}
                 ${c.vencedora ? `<span class="status concluida">vencedora</span>` : (jaTemOC ? '' : `<button class="btn btn-outline btn-sm" onclick="marcarVencedora('${so.id}','${c.id}')">Selecionar</button>`)}
               </td>
             </tr>
@@ -637,14 +752,15 @@ function openNovaCotacao(solicitacaoId){
 
     <h3 style="margin:16px 0 8px">Valores por item</h3>
     <table>
-      <thead><tr><th>Item</th><th>Qtd</th><th>Valor unit.</th><th>Disponível</th></tr></thead>
+      <thead><tr><th>Item</th><th>Qtd</th><th>Valor unit.</th><th>Subtotal (unit. × qtd)</th><th>Disponível</th></tr></thead>
       <tbody>
         ${itens.map(it=>`
           <tr>
             <td>${it.item}</td>
             <td>${it.quantidade} ${it.unidade||''}</td>
-            <td><input type="number" step="0.01" class="ci-valor" data-item="${it.id}" value="0"></td>
-            <td style="text-align:center"><input type="checkbox" class="ci-disp" data-item="${it.id}" checked style="width:auto"></td>
+            <td><input type="number" step="0.01" class="ci-valor" data-item="${it.id}" data-qtd="${it.quantidade}" value="0" oninput="atualizarSubtotalItem('${it.id}')"></td>
+            <td><span id="subtotal_${it.id}" class="muted" style="font-weight:600">${money(0)}</span></td>
+            <td style="text-align:center"><input type="checkbox" class="ci-disp" data-item="${it.id}" checked style="width:auto" onchange="atualizarSubtotalItem('${it.id}')"></td>
           </tr>
         `).join('')}
       </tbody>
@@ -655,6 +771,17 @@ function openNovaCotacao(solicitacaoId){
       <button class="btn btn-primary" onclick="salvarCotacao('${solicitacaoId}')">Salvar e gerar ID</button>
     </div>
   `);
+}
+
+function atualizarSubtotalItem(itemId){
+  const inputValor = document.querySelector(`.ci-valor[data-item="${itemId}"]`);
+  const inputDisp = document.querySelector(`.ci-disp[data-item="${itemId}"]`);
+  const span = document.getElementById('subtotal_'+itemId);
+  if(!inputValor || !span) return;
+  const qtd = Number(inputValor.dataset.qtd)||1;
+  const valor = Number(inputValor.value)||0;
+  const disponivel = inputDisp ? inputDisp.checked : true;
+  span.textContent = disponivel ? money(valor * qtd) : 'indisponível';
 }
 
 async function salvarCotacao(solicitacaoId){
@@ -713,6 +840,144 @@ async function salvarCotacao(solicitacaoId){
     renderSolicitacaoDetail(solicitacaoId);
   }catch(err){
     toast('Erro ao salvar cotação: '+err.message, true);
+  }
+}
+
+/* ============================================================
+   EDIÇÃO DE COTAÇÃO RECEBIDA
+   Bloqueada se essa cotação já gerou uma Ordem de Compra.
+   ============================================================ */
+async function openEditarCotacao(cotacaoId, solicitacaoId){
+  const { count: countOC, error: errOC } = await sb
+    .from('ordens_compra').select('id', { count:'exact', head:true }).eq('cotacao_id', cotacaoId);
+  if(errOC){ toast('Erro ao verificar Ordens de Compra: '+errOC.message, true); return; }
+
+  if(countOC && countOC > 0){
+    renderModal(`
+      <h2>Não é possível editar</h2>
+      <p>Esta cotação já gerou uma Ordem de Compra e não pode mais ser editada, para preservar o histórico do processo.</p>
+      <div class="row" style="margin-top:16px;justify-content:flex-end"><button class="btn btn-primary" onclick="closeModal()">Entendi</button></div>
+    `);
+    return;
+  }
+
+  const { data: cot, error } = await sb.from('cotacoes').select('*').eq('id', cotacaoId).single();
+  if(error){ toast('Erro ao carregar cotação: '+error.message, true); return; }
+  const { data: itens } = await sb.from('solicitacao_itens').select('*').eq('solicitacao_id', solicitacaoId).order('ordem');
+  const { data: cotItens } = await sb.from('cotacao_itens').select('*').eq('cotacao_id', cotacaoId);
+  const { data: fornecedores } = await sb.from('fornecedores').select('*').eq('tenant_id', cfg.tenantId).eq('ativo', true);
+  const valoresPorItem = {};
+  (cotItens||[]).forEach(ci=>{ valoresPorItem[ci.solicitacao_item_id] = ci; });
+
+  renderModal(`
+    <div class="row"><h2>Editar Cotação ${cot.numero}</h2><button class="close-x" onclick="closeModal()">✕</button></div>
+    <div class="grid2">
+      <div class="field"><label>Fornecedor</label>
+        <select id="ec_fornecedor">
+          ${fornecedores.map(f=>`<option value="${f.id}" ${f.id===cot.fornecedor_id?'selected':''}>${f.nome}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field"><label>Data de recebimento</label><input type="date" id="ec_data" value="${cot.data_recebimento}"></div>
+    </div>
+    <div class="field"><label>Origem (assunto/remetente do e-mail)</label><input id="ec_origem" value="${cot.origem_email||''}"></div>
+    <div class="grid3">
+      <div class="field"><label>Frete</label><input type="number" id="ec_frete" value="${cot.frete||0}" step="0.01"></div>
+      <div class="field"><label>Forma de pagamento</label><input id="ec_pagto" value="${cot.forma_pagamento||''}"></div>
+      <div class="field"><label>Prazo de entrega</label><input id="ec_prazo" value="${cot.prazo_entrega||''}"></div>
+    </div>
+    <div class="field"><label>Validade da cotação</label><input type="date" id="ec_validade" value="${cot.validade||''}"></div>
+    ${cot.anexo_path?`<p class="muted" style="font-size:12.5px">Anexo atual: <a class="link" href="#" onclick="abrirAnexo('${cot.anexo_path}');return false;">📎 ver anexo</a> — escolher um novo arquivo abaixo substitui o atual.</p>`:''}
+    <div class="field"><label>${cot.anexo_path?'Substituir anexo (opcional)':'Anexo (PDF/print do e-mail)'}</label><input type="file" id="ec_anexo" accept="application/pdf,image/*"></div>
+
+    <h3 style="margin:16px 0 8px">Valores por item</h3>
+    <table>
+      <thead><tr><th>Item</th><th>Qtd</th><th>Valor unit.</th><th>Subtotal</th><th>Disponível</th></tr></thead>
+      <tbody>
+        ${itens.map(it=>{
+          const ci = valoresPorItem[it.id];
+          const valorAtual = ci ? ci.valor_unitario : 0;
+          const dispAtual = ci ? ci.disponivel : true;
+          return `
+          <tr>
+            <td>${it.item}</td>
+            <td>${it.quantidade} ${it.unidade||''}</td>
+            <td><input type="number" step="0.01" class="eci-valor" data-item="${it.id}" data-qtd="${it.quantidade}" value="${valorAtual}" oninput="atualizarSubtotalItemEdicao('${it.id}')"></td>
+            <td><span id="esubtotal_${it.id}" class="muted" style="font-weight:600">${dispAtual?money(valorAtual*it.quantidade):'indisponível'}</span></td>
+            <td style="text-align:center"><input type="checkbox" class="eci-disp" data-item="${it.id}" ${dispAtual?'checked':''} onchange="atualizarSubtotalItemEdicao('${it.id}')"></td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+
+    <div class="row" style="margin-top:16px;justify-content:flex-end">
+      <button class="btn btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="salvarEdicaoCotacao('${cotacaoId}','${solicitacaoId}')">Salvar alterações</button>
+    </div>
+  `);
+}
+
+function atualizarSubtotalItemEdicao(itemId){
+  const inputValor = document.querySelector(`.eci-valor[data-item="${itemId}"]`);
+  const inputDisp = document.querySelector(`.eci-disp[data-item="${itemId}"]`);
+  const span = document.getElementById('esubtotal_'+itemId);
+  if(!inputValor || !span) return;
+  const qtd = Number(inputValor.dataset.qtd)||1;
+  const valor = Number(inputValor.value)||0;
+  const disponivel = inputDisp ? inputDisp.checked : true;
+  span.textContent = disponivel ? money(valor*qtd) : 'indisponível';
+}
+
+async function salvarEdicaoCotacao(cotacaoId, solicitacaoId){
+  const fornecedor_id = document.getElementById('ec_fornecedor').value;
+  const data_recebimento = document.getElementById('ec_data').value;
+  const origem_email = document.getElementById('ec_origem').value.trim();
+  const frete = Number(document.getElementById('ec_frete').value)||0;
+  const forma_pagamento = document.getElementById('ec_pagto').value.trim();
+  const prazo_entrega = document.getElementById('ec_prazo').value.trim();
+  const validade = document.getElementById('ec_validade').value || null;
+  const fileInput = document.getElementById('ec_anexo');
+
+  const itemRows = [...document.querySelectorAll('.eci-valor')].map(inp=>({
+    solicitacao_item_id: inp.dataset.item,
+    valor_unitario: Number(inp.value)||0,
+    disponivel: document.querySelector(`.eci-disp[data-item="${inp.dataset.item}"]`).checked
+  }));
+
+  const { data: itens } = await sb.from('solicitacao_itens').select('*').eq('solicitacao_id', solicitacaoId);
+  let valor_total = frete;
+  itemRows.forEach(r=>{
+    const it = itens.find(i=>i.id===r.solicitacao_item_id);
+    const tot = r.disponivel ? r.valor_unitario * (it?.quantidade||1) : 0;
+    r.valor_total = tot;
+    valor_total += tot;
+  });
+
+  try{
+    const updatePayload = { fornecedor_id, data_recebimento, origem_email, frete, forma_pagamento, prazo_entrega, validade, valor_total };
+
+    if(fileInput.files && fileInput.files[0]){
+      const file = fileInput.files[0];
+      const { data: cotAtual } = await sb.from('cotacoes').select('numero').eq('id', cotacaoId).single();
+      const path = `${cfg.tenantId}/${cotAtual.numero}-${file.name}`;
+      const { error: upErr } = await sb.storage.from('cotacoes-anexos').upload(path, file, { upsert:true });
+      if(upErr) toast('Aviso: falha ao subir novo anexo ('+upErr.message+'), o restante será salvo mesmo assim.', true);
+      else updatePayload.anexo_path = path;
+    }
+
+    const { error } = await sb.from('cotacoes').update(updatePayload).eq('id', cotacaoId);
+    if(error) throw error;
+
+    // Substitui os itens da cotação (seguro: já confirmamos que não há OC vinculada)
+    const { error: eDel } = await sb.from('cotacao_itens').delete().eq('cotacao_id', cotacaoId);
+    if(eDel) throw eDel;
+    const { error: eIns } = await sb.from('cotacao_itens').insert(itemRows.map(r=>({...r, cotacao_id: cotacaoId})));
+    if(eIns) throw eIns;
+
+    closeModal();
+    toast('Cotação atualizada.');
+    renderSolicitacaoDetail(solicitacaoId);
+  }catch(err){
+    toast('Erro ao salvar edição: '+err.message, true);
   }
 }
 
