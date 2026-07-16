@@ -1111,7 +1111,7 @@ async function renderOrdensList(){
     <div class="card" style="padding:0">
       ${ocs.length===0 ? `<div class="empty"><div class="display">Nenhuma OC emitida ainda</div></div>` : `
       <table>
-        <thead><tr><th>ID</th><th>Solicitação</th><th>Fornecedor</th><th>Emissão</th><th>Valor</th><th>Autorização</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>Solicitação</th><th>Fornecedor</th><th>Emissão</th><th>Valor</th><th>Autorização</th><th>Status</th><th></th><th></th></tr></thead>
         <tbody>
           ${ocs.map(o=>`
             <tr>
@@ -1127,6 +1127,7 @@ async function renderOrdensList(){
                 </select>
               </td>
               <td><button class="btn btn-outline btn-sm" title="Exportar/enviar a ordem de compra" onclick="exportarOCDoc('${o.id}')">📄 Exportar</button></td>
+              <td><button class="btn btn-danger btn-sm" title="Excluir ordem de compra" onclick="confirmarExclusaoOC('${o.id}','${o.numero}')">🗑</button></td>
             </tr>
           `).join('')}
         </tbody>
@@ -1137,6 +1138,55 @@ async function renderOrdensList(){
 async function updateOCStatus(id, status){
   const { error } = await sb.from('ordens_compra').update({ status }).eq('id', id);
   if(error) toast('Erro: '+error.message, true); else toast('Status atualizado.');
+}
+
+/* ============================================================
+   EXCLUSÃO DE ORDEM DE COMPRA
+   Bloqueada se status for 'recebida' ou 'encerrada' (processo já
+   fechado — usar "cancelada" nesses casos em vez de excluir).
+   Ao excluir, a solicitação volta para o status anterior
+   (em_cotacao ou aberta), liberando para gerar outra OC se precisar.
+   ============================================================ */
+async function confirmarExclusaoOC(id, numero){
+  const { data: oc, error } = await sb.from('ordens_compra').select('status, solicitacao_id').eq('id', id).single();
+  if(error){ toast('Erro ao carregar OC: '+error.message, true); return; }
+
+  if(oc.status === 'recebida' || oc.status === 'encerrada'){
+    renderModal(`
+      <h2>Não é possível excluir</h2>
+      <p>A Ordem de Compra <b>${numero}</b> está com status "${oc.status.replace('_',' ')}", ou seja, o processo já foi concluído. Excluir apagaria um registro de histórico.</p>
+      <p class="muted">Se foi um engano, mude o status para "cancelada" em vez de excluir.</p>
+      <div class="row" style="margin-top:16px;justify-content:flex-end"><button class="btn btn-primary" onclick="closeModal()">Entendi</button></div>
+    `);
+    return;
+  }
+
+  renderModal(`
+    <h2>Excluir Ordem de Compra ${numero}?</h2>
+    <p>Isso vai apagar permanentemente esta OC. A solicitação de origem volta a ficar disponível para gerar uma nova ordem de compra.</p>
+    <p style="color:var(--danger);font-weight:600">Essa ação não pode ser desfeita.</p>
+    <div class="field"><label>Digite o número da OC para confirmar</label><input id="del_oc_confirm_numero" placeholder="${numero}"></div>
+    <div class="row" style="margin-top:16px;justify-content:flex-end">
+      <button class="btn btn-outline" onclick="closeModal()">Cancelar</button>
+      <button class="btn btn-danger" onclick="executarExclusaoOC('${id}','${numero}','${oc.solicitacao_id}')">Excluir definitivamente</button>
+    </div>
+  `);
+}
+
+async function executarExclusaoOC(id, numero, solicitacaoId){
+  const digitado = document.getElementById('del_oc_confirm_numero').value.trim();
+  if(digitado !== numero){ toast('O número digitado não confere com '+numero+'. Exclusão cancelada.', true); return; }
+
+  const { error } = await sb.from('ordens_compra').delete().eq('id', id);
+  if(error){ toast('Erro ao excluir: '+error.message, true); return; }
+
+  const { count: countCot } = await sb.from('cotacoes').select('id', { count:'exact', head:true }).eq('solicitacao_id', solicitacaoId);
+  const novoStatus = (countCot && countCot > 0) ? 'em_cotacao' : 'aberta';
+  await sb.from('solicitacoes_orcamento').update({ status: novoStatus }).eq('id', solicitacaoId);
+
+  closeModal();
+  toast(`Ordem de Compra ${numero} excluída.`);
+  route();
 }
 
 /* ============================================================
